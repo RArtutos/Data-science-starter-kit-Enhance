@@ -1,0 +1,11 @@
+version: '3'
+
+services:
+  duckdb:
+    build: .
+    volumes:
+      - ./data:/data
+      - ./notebooks:/notebooks
+    ports:
+      - "8888:8888"
+    command: jupyter notebook --ip=0.0.0.0 --allow-root --notebook-dir=/notebooks

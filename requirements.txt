@@ -1,0 +1,5 @@
+duckdb
+jupyter
+pandas
+matplotlib
+aria2
