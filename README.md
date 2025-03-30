@@ -125,7 +125,7 @@ Book classification distribution analysis.
 
 Analysis of base rank scores in the dataset.
 
-## 📊 ElasticsearchAux Analysis Examples
+## 📊 ElasticsearchAux Analysis Examples (These data are not complete, they are the result of the query in 1/12 of the dataset.)
 
 ### Content Types Analysis
 ![Content Types Analysis](images/1Content%20Types%20Analysis.png)
