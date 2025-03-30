@@ -60,7 +60,7 @@ CPU = 16
 
 
 # Target size for split files (in MB)
-TARGET_SPLIT_SIZE_MB = 10  # 10MB parts for better parallelization
+TARGET_SPLIT_SIZE_MB = 10  # In order not to fill up all the ram, if you have more than 30gb I recommend increasing only this value
 
 def create_directories():
     """Creates necessary directories if they don't exist."""
