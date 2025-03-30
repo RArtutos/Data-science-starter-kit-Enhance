@@ -126,7 +126,66 @@ Book classification distribution analysis.
 Analysis of base rank scores in the dataset.
 
 ## 📊 ElasticsearchAux Analysis Examples
-Coming soon!
+
+### Content Types Analysis
+![Content Types Analysis](images/1Content%20Types%20Analysis.png)
+Distribution of different content types across the dataset.
+
+### Publication Year Analysis
+![Publication Year Analysis](images/2Publication%20Year%20Analysis.png)
+Histogram showing publication trends over different years.
+
+### Language Distribution Analysis
+![Language Distribution Analysis](images/3Language%20Distribution%20Analysis.png)
+Breakdown of languages represented in the dataset.
+
+### File Size Analysis
+![File Size Analysis](images/4File%20Size%20Analysis.png)
+Distribution of file sizes throughout the collection.
+
+### Publisher Analysis
+![Publisher Analysis](images/5Publisher%20Analysis.png)
+Top publishers represented in the dataset by volume.
+
+### File Extensions Analysis
+![File Extensions Analysis](images/6File%20Extensions%20Analysis.png)
+Frequency of different file formats in the collection.
+
+### Access Type Analysis
+![Access Type Analysis](images/7Access%20Type%20Analysis.png)
+Analysis of different access methods for the content.
+
+### Publications Over Time by Content Type
+![Publications Over Time by Content Type](images/8Publications%20Over%20Time%20by%20Content%20Type.png)
+Trend analysis of how content types evolved over publication years.
+
+### Author Analysis
+![Author Analysis](images/9Author%20Analysis.png)
+Most represented authors in the dataset.
+
+### Language and Publication Year Correlation
+![Language and Publication Year Correlation](images/10Language%20and%20Publication%20Year%20Correlation.png)
+How language distribution changes across publication years.
+
+### Torrent Availability Analysis
+![Torrent Availability Analysis](images/12Torrent%20Availability%20Analysis.png)
+Analysis of torrent availability for the content.
+
+### Title Word Cloud Analysis
+![Title Word Cloud Analysis](images/14Title%20Word%20Cloud%20Analysis.png)
+Visual representation of most common words in titles.
+
+### Publication Year and File Size Correlation
+![Publication Year and File Size Correlation](images/15Publication%20Year%20and%20File%20Size%20Correlation.png)
+Examining how file sizes relate to publication years.
+
+### File Extension and Content Type Analysis
+![File Extension and Content Type Analysis](images/19File%20Extension%20and%20Content%20Type%20Analysis.png)
+Relationship between file formats and content categories.
+
+### Combined Dataset Comparison Overview
+![Combined Dataset Comparison Overview](images/28Combined%20Dataset%20Comparison%20Overview.png)
+Comparative analysis of multiple datasets in the collection.
 
 ## 📊 Anna's Archive Analysis Examples
 Coming soon!
