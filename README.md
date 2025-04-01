@@ -58,14 +58,14 @@ project/
 ### Data Processing Steps
 
 1. **Elasticsearch Data**
-   - Place `.gz` files in `data/elasticsearch/`
-   - Additional ElasticsearchAux files go in `data/elasticsearchAux/`
-   - Run processing notebook to convert to Parquet
-
+   - Place all `.gz` files in the `data/elasticsearch/` folder and all `.gz` files in the `data/elasticsearchAux/` folder.
 2. **AAC Data**
-   - Place .zst files in `data/aac/`
+   - Place all `.zst` files in the `data/aac/` folder.
+   - Then, run the processing script to convert the files to Parquet format.
 
-### Processing Options
+
+
+### Processing the data 
 
 #### Using initialScript.py
 ```bash
