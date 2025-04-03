@@ -27,8 +27,8 @@ logger = logging.getLogger()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Configurable parameters
-FIELD_PRESENCE_THRESHOLD = 0.50  # Field must be present in at least 50% of records (changed from 50%)
-AAC_FIELD_PRESENCE_THRESHOLD = 0.50  # Same threshold for AAC records, adjust if needed
+FIELD_PRESENCE_THRESHOLD = 0.20  # Field must be present in at least
+AAC_FIELD_PRESENCE_THRESHOLD = 0.20  # Same threshold for AAC records, adjust if needed
 
 # Patterns to identify different datasets
 DATASET_PATTERNS = {
@@ -47,20 +47,15 @@ DATASET_RECORD_COUNTS_LOCK = threading.Lock()
 DATASET_FIELDS = defaultdict(lambda: defaultdict(int))
 DATASET_RECORD_COUNTS = defaultdict(int)
 
-
-#VALUES FOR 30GB OF RAM
 # OPTIMIZED SETTINGS
 MAX_WORKERS_ANALYSIS = 50  # Increased to 50 for analysis
 MAX_WORKERS_CONVERSION = 4
 MAX_WORKERS_MERGE = 4      # For merging parquet files
 mega_batch_size = 500      # The last merge
 FILE_SAMPLE_RATE = 0.20    # Analyze only 20% of files
-RAM_MERGE="30GB"
-CPU = 16
-
 
 # Target size for split files (in MB)
-TARGET_SPLIT_SIZE_MB = 10  # In order not to fill up all the ram, if you have more than 30gb I recommend increasing only this value
+TARGET_SPLIT_SIZE_MB = 10  # 10MB parts for better parallelization
 
 def create_directories():
     """Creates necessary directories if they don't exist."""
@@ -145,15 +140,46 @@ def count_lines_and_avg_size(file_path):
     
     total_size = os.path.getsize(file_path)
     
-    # Count total lines
-    result = subprocess.run(["wc", "-l", file_path], capture_output=True, text=True)
-    line_count = int(result.stdout.strip().split()[0])
+    # For extremely large files (>10GB), use sampling
+    if total_size > 10 * 1024 * 1024 * 1024:  # >10GB
+        logging.info(f"Extremely large file detected ({total_size/(1024*1024*1024):.2f} GB), using sampling")
+        
+        # Sample 1GB of the file to estimate line count
+        sample_size = 1024 * 1024 * 1024  # 1GB
+        line_count_sample = 0
+        bytes_read = 0
+        
+        with open(file_path, 'rb') as f:
+            sample_data = f.read(sample_size)
+            bytes_read = len(sample_data)
+            line_count_sample = sample_data.count(b'\n')
+        
+        # Calculate average line size and estimate total lines
+        if line_count_sample > 0:
+            avg_bytes_per_line = bytes_read / line_count_sample
+            estimated_lines = int(total_size / avg_bytes_per_line)
+            logging.info(f"Estimated {estimated_lines:,} lines based on 1GB sampling")
+            return estimated_lines, avg_bytes_per_line
     
-    # Calculate average bytes per line
-    avg_bytes_per_line = total_size / line_count if line_count > 0 else 0
-    
-    logging.info(f"Total lines: {line_count}, avg bytes/line: {avg_bytes_per_line:.2f}")
-    return line_count, avg_bytes_per_line
+    # For regular sized files, use wc -l
+    try:
+        result = subprocess.run(["wc", "-l", file_path], capture_output=True, text=True)
+        line_count = int(result.stdout.strip().split()[0])
+        
+        # Calculate average bytes per line
+        avg_bytes_per_line = total_size / line_count if line_count > 0 else 0
+        
+        logging.info(f"Total lines: {line_count:,}, avg bytes/line: {avg_bytes_per_line:.2f}")
+        return line_count, avg_bytes_per_line
+        
+    except Exception as e:
+        logging.error(f"Error counting lines: {str(e)}")
+        # Fallback to a conservative estimate
+        estimated_avg_line_size = 500  # bytes, conservative estimate for JSON
+        estimated_lines = total_size // estimated_avg_line_size
+        logging.info(f"Using fallback line count estimate: {estimated_lines:,}")
+        return estimated_lines, estimated_avg_line_size
+
 
 def extract_nested_fields(data, prefix=""):
     """
@@ -196,85 +222,140 @@ def analyze_json_structure(file_path, dataset_name):
                 logging.warning(f"Invalid JSON record in {os.path.basename(file_path)}")
                 continue
     
-    # Thread-safe update of global counters - APPLYING 10X SCALING FACTOR
+    # Thread-safe update of global counters - APPLYING 5X SCALING FACTOR
     with DATASET_FIELDS_LOCK:
         for field, count in local_fields.items():
-            # Apply 10x scaling because we only analyzed 10% of files
-            DATASET_FIELDS[dataset_name][field] += count * 10
+            # Apply 5x scaling because we only analyzed 20% of files
+            DATASET_FIELDS[dataset_name][field] += count * 5
     
     with DATASET_RECORD_COUNTS_LOCK:
-        # Apply 10x scaling to record count too
-        DATASET_RECORD_COUNTS[dataset_name] += record_count * 10
+        # Apply 5x scaling to record count too
+        DATASET_RECORD_COUNTS[dataset_name] += record_count * 5
     
     logging.info(f"Processed ALL {record_count} records from {os.path.basename(file_path)}")
     logging.info(f"Found {len(local_fields)} unique fields")
     return record_count
 
-def split_for_target_size(json_path, parts_dir, file_name, recursive=True):
+
+def count_lines_and_avg_size(file_path):
     """
-    Split a file into parts of approximately 10MB (based on line count).
-    Returns a list of all generated part files.
+    Efficiently counts the number of lines in a file and calculates average line size.
+    Uses sampling for very large files to improve performance.
     """
-    logging.info(f"Splitting {os.path.basename(json_path)} for target size of {TARGET_SPLIT_SIZE_MB}MB...")
+    logging.info(f"Counting lines in {os.path.basename(file_path)}...")
     
-    # Get total lines and average line size
-    total_lines, avg_bytes_per_line = count_lines_and_avg_size(json_path)
+    total_size = os.path.getsize(file_path)
     
-    # Calculate how many lines to achieve target size
-    target_size_bytes = TARGET_SPLIT_SIZE_MB * 1024 * 1024
-    lines_per_file = math.ceil(target_size_bytes / avg_bytes_per_line)
-    
-    # Calculate total number of parts
-    num_parts = math.ceil(total_lines / lines_per_file)
-    
-    logging.info(f"Splitting into approximately {num_parts} parts of {lines_per_file} lines each")
-    
-    # Run the split command
-    split_prefix = os.path.join(parts_dir, f"{file_name}_part_")
-    
-    # Determine correct extension
-    file_ext = ".json"
-    if json_path.endswith(".jsonl"):
-        file_ext = ".jsonl"
-    
-    subprocess.run([
-        "split", 
-        "-d", 
-        f"--additional-suffix={file_ext}", 
-        f"--lines={lines_per_file}", 
-        json_path, 
-        split_prefix
-    ], check=True)
-    
-    # Get list of created part files
-    part_files = sorted(glob.glob(f"{split_prefix}*"))
-    logging.info(f"Created {len(part_files)} part files")
-    
-    # Check if any parts are still very large and need further splitting
-    all_part_files = []
-    
-    for part_file in part_files:
-        file_size_mb = os.path.getsize(part_file) / (1024 * 1024)
+    # If file is extremely large (>10GB), use sampling
+    if total_size > 10 * 1024 * 1024 * 1024:  # >1GB
+        logging.info(f"Large file detected ({total_size/(1024*1024*1024):.2f} GB), using sampling method")
         
-        if file_size_mb > TARGET_SPLIT_SIZE_MB * 2 and recursive:  # If more than double our target
-            logging.info(f"Part file {os.path.basename(part_file)} is still {file_size_mb:.2f}MB, splitting further")
-            
-            # Define subpart naming
-            sub_file_name = os.path.splitext(os.path.basename(part_file))[0]
-            
-            # Recursively split the large part
-            sub_part_files = split_for_target_size(part_file, parts_dir, sub_file_name, recursive=True)
-            
-            # Add subparts to the result list
-            all_part_files.extend(sub_part_files)
-            
-            # Remove the original large part file
-            os.remove(part_file)
-            logging.info(f"Removed large part file after further splitting: {os.path.basename(part_file)}")
-        else:
-            all_part_files.append(part_file)
+        # Calculate average line size based on a sample
+        sample_size = 1024 * 1024 * 1024  # Sample 1GB
+        line_count_sample = 0
+        bytes_read = 0
+        
+        # Read the beginning of the file
+        with open(file_path, 'rb') as f:
+            # Read the first portion of the file
+            sample_data = f.read(sample_size)
+            bytes_read = len(sample_data)
+            line_count_sample = sample_data.count(b'\n')
+        
+        # Calculate average lines per byte and estimate total
+        if line_count_sample > 0 and bytes_read > 0:
+            avg_bytes_per_line = bytes_read / line_count_sample
+            estimated_lines = int(total_size / avg_bytes_per_line)
+            logging.info(f"Estimated {estimated_lines:,} lines based on sampling")
+            return estimated_lines, avg_bytes_per_line
     
-    return all_part_files
+    # For files that aren't extremely large or if sampling failed,
+    # use native line counter
+    try:
+        if os.name == 'posix':  # Linux/Mac
+            # On Unix/Linux systems, use wc which is very efficient
+            result = subprocess.run(["wc", "-l", file_path], 
+                                  capture_output=True, 
+                                  text=True)
+            if result.returncode == 0:
+                line_count = int(result.stdout.strip().split()[0])
+            else:
+                raise subprocess.SubprocessError(f"wc command failed: {result.stderr}")
+        else:
+            # On Windows or if wc fails, count manually but efficiently
+            line_count = 0
+            with open(file_path, 'rb') as f:
+                # Read in large chunks for efficiency
+                chunk_size = 1024 * 1024  # 1MB chunks
+                chunk = f.read(chunk_size)
+                while chunk:
+                    line_count += chunk.count(b'\n')
+                    chunk = f.read(chunk_size)
+    
+    except Exception as e:
+        logging.warning(f"Error counting lines: {str(e)}")
+        # If everything fails, make a conservative estimate
+        logging.info("Falling back to estimation based on average line length")
+        # Assume a reasonable average line size for JSONL
+        avg_bytes_per_line = 500  # conservative estimate for JSON records
+        line_count = total_size // avg_bytes_per_line
+    
+    # Calculate average size per line
+    avg_bytes_per_line = total_size / line_count if line_count > 0 else 500
+    
+    logging.info(f"Total lines: {line_count:,}, avg bytes/line: {avg_bytes_per_line:.2f}")
+    return line_count, avg_bytes_per_line
+
+def split_for_target_size(jsonl_path, parts_dir, file_name, target_size_mb=10):
+    """
+    Splits a large JSONL file into smaller files, each with a size close to the target size.
+    The division is based on the file size, not the number of lines. This is suitable for very large files.
+    
+    :param jsonl_path: Path to the input JSONL file.
+    :param parts_dir: Directory to save the split files.
+    :param file_name: Base name for the split files.
+    :param target_size_mb: Target size in MB for each split file. Default is 10MB.
+    :return: List of paths to the generated split files.
+    """
+    logging.info(f"Splitting {os.path.basename(jsonl_path)} for target size of {target_size_mb}MB...")
+
+    target_size_bytes = target_size_mb * 1024 * 1024  # Convert target size to bytes
+    current_part = 1
+    current_size = 0  # Track the accumulated size in bytes
+    current_lines = []  # Accumulate lines to write them to the output file
+    
+    part_files = []  # To store the paths of the split files
+    
+    # Open the input JSONL file and start processing line by line
+    with open(jsonl_path, 'r') as f:
+        for line in f:
+            current_lines.append(line)  # Add the current line to the list
+            current_size += len(line.encode('utf-8'))  # Get the size of the line in bytes
+            
+            # If the accumulated size exceeds the target size, write to a new part file
+            if current_size >= target_size_bytes:
+                part_file = os.path.join(parts_dir, f"{file_name}_part_{current_part}.jsonl")
+                
+                with open(part_file, 'w') as part_f:
+                    part_f.writelines(current_lines)  # Write accumulated lines to the file
+                
+                part_files.append(part_file)  # Add the part file to the list of split files
+                
+                # Reset for the next part
+                current_part += 1
+                current_size = 0
+                current_lines = []
+        
+        # If there are any remaining lines that didn't exceed the size limit, write them to the final part file
+        if current_lines:
+            part_file = os.path.join(parts_dir, f"{file_name}_part_{current_part}.jsonl")
+            with open(part_file, 'w') as part_f:
+                part_f.writelines(current_lines)
+            part_files.append(part_file)
+
+    logging.info(f"Created {len(part_files)} split files.")
+    return part_files
+
 
 def decompress_zst_file(zst_file, output_file):
     """Decompress a Zstandard compressed file."""
@@ -291,18 +372,34 @@ def decompress_file(compressed_file, json_dir, compression):
     """Decompress a single compressed file."""
     base_name = os.path.basename(compressed_file)
     
+    # More robust pattern matching
     if compression == 'gzip':
-        file_pattern = r'(.+)\.json\.gz'
+        # Match anything ending with .json.gz
+        if base_name.endswith('.json.gz'):
+            file_name = base_name[:-8]  # Remove .json.gz
+            json_name = f"{file_name}.json"
+        else:
+            logging.error(f"Unexpected filename format for gzip file: {base_name}")
+            return None
     else:  # zstd
-        file_pattern = r'(.+)\.jsonl\.seekable\.zst'
+        # Handle various zst file patterns
+        if base_name.endswith('.jsonl.seekable.zst'):
+            file_name = base_name[:-18]  # Remove .jsonl.seekable.zst
+            json_name = f"{file_name}.jsonl"
+        elif base_name.endswith('.jsonl.zst'):
+            file_name = base_name[:-10]  # Remove .jsonl.zst
+            json_name = f"{file_name}.jsonl"
+        elif base_name.endswith('.zst'):
+            file_name = base_name[:-4]  # Remove .zst
+            # Check if remaining part ends with .jsonl
+            if file_name.endswith('.jsonl'):
+                json_name = file_name
+            else:
+                json_name = f"{file_name}.jsonl"  # Assume it should be jsonl
+        else:
+            logging.error(f"Unexpected filename format for zst file: {base_name}")
+            return None
     
-    file_name = re.match(file_pattern, base_name).group(1)
-    
-    if compression == 'gzip':
-        json_name = f"{file_name}.json"
-    else:
-        json_name = f"{file_name}.jsonl"
-        
     json_path = os.path.join(json_dir, json_name)
     
     logging.info(f"Decompressing {base_name}...")
@@ -323,12 +420,12 @@ def decompress_file(compressed_file, json_dir, compression):
         logging.error(f"Error decompressing {base_name}: {e}")
         return None
 
+
 def process_directory(config):
     """
-    Process an entire directory with pipeline parallelism:
-    - Files begin splitting as soon as they're decompressed
-    - Analysis starts as soon as split parts are available
-    - No waiting for all files to complete a stage before starting the next
+    Process an entire directory with sequential decompression and splitting:
+    - Files are decompressed and split one at a time
+    - Analysis starts concurrently after splitting completes
     """
     source_dir = config['source_dir']
     json_dir = config['json_dir']
@@ -353,141 +450,51 @@ def process_directory(config):
     
     logging.info(f"Processing directory {source_dir} with {len(compressed_files)} compressed files")
     
-    # Thread-safe queues for pipeline stages
-    decompress_queue = queue.Queue()  # Files to decompress
-    split_queue = queue.Queue()       # Files ready to split
-    analysis_parts = []               # Tracks all split parts for analysis
-    
-    # Fill decompress queue with all files
-    for file in compressed_files:
-        decompress_queue.put(file)
-    
     # Track all split parts for each dataset
     all_split_parts = defaultdict(list)
-    split_parts_lock = threading.Lock()
     
-    # Track completed files for progress reporting
-    completed_decompress = 0
-    completed_split = 0
-    completed_decompress_lock = threading.Lock()
-    completed_split_lock = threading.Lock()
-    
-    def decompress_worker():
-        """Worker thread to decompress files and add to split queue"""
-        nonlocal completed_decompress
-        while True:
-            try:
-                # Get next file to decompress (non-blocking)
-                try:
-                    compressed_file = decompress_queue.get_nowait()
-                except queue.Empty:
-                    break
-                
-                # Decompress the file
-                json_file = decompress_file(compressed_file, json_dir, compression)
-                
-                # If successful, add to split queue
-                if json_file and os.path.exists(json_file):
-                    split_queue.put(json_file)
-                
-                # Update progress
-                with completed_decompress_lock:
-                    completed_decompress += 1
-                    logging.info(f"Decompression progress: {completed_decompress}/{len(compressed_files)} files")
-                
-                # Mark task as done
-                decompress_queue.task_done()
-                
-            except Exception as e:
-                logging.error(f"Error in decompress worker: {str(e)}")
-    
-    def split_worker():
-        """Worker thread to split decompressed files"""
-        nonlocal completed_split
-        while True:
-            try:
-                # Check if we're done and no more files to decompress
-                if decompress_queue.empty() and split_queue.empty() and completed_decompress == len(compressed_files):
-                    break
-                
-                # Try to get a file to split (non-blocking)
-                try:
-                    json_file = split_queue.get_nowait()
-                except queue.Empty:
-                    # If no files ready yet, sleep briefly and check again
-                    time.sleep(0.1)
-                    continue
-                
-                # Process this file
-                if not json_file or not os.path.exists(json_file):
-                    split_queue.task_done()
-                    continue
-                
-                # Split the file
-                file_name = os.path.splitext(os.path.basename(json_file))[0]
-                try:
-                    # Split the file into parts
-                    parts = split_for_target_size(json_file, parts_dir, file_name)
-                    
-                    # Determine dataset for these parts
-                    if compression == 'gzip':
-                        full_name = f"{file_name}.json.gz"
-                    else:  # zstd
-                        full_name = f"{file_name}.jsonl.seekable.zst"
-                    
-                    dataset_name = determine_dataset(full_name)
-                    
-                    # Add parts to the appropriate dataset group
-                    with split_parts_lock:
-                        all_split_parts[dataset_name].extend(parts)
-                    
-                    # Add to analysis list
-                    analysis_parts.extend(parts)
-                    
-                    # Remove original JSON file
-                    os.remove(json_file)
-                    logging.info(f"Removed {os.path.basename(json_file)} after splitting")
-                    
-                except Exception as e:
-                    logging.error(f"Error splitting {os.path.basename(json_file)}: {str(e)}")
-                
-                # Update progress
-                with completed_split_lock:
-                    completed_split += 1
-                    logging.info(f"Split progress: {completed_split}/{len(compressed_files)} files")
-                
-                # Mark task as done
-                split_queue.task_done()
-                
-            except Exception as e:
-                logging.error(f"Error in split worker: {str(e)}")
-    
-    # Start pipeline workers
-    decompress_threads = []
-    for i in range(min(MAX_WORKERS_ANALYSIS, len(compressed_files))):
-        t = threading.Thread(target=decompress_worker)
-        t.daemon = True
-        t.start()
-        decompress_threads.append(t)
-    
-    split_threads = []
-    for i in range(min(MAX_WORKERS_ANALYSIS // 2, len(compressed_files))):
-        t = threading.Thread(target=split_worker)
-        t.daemon = True
-        t.start()
-        split_threads.append(t)
-    
-    # Wait for all decompression to complete
-    for t in decompress_threads:
-        t.join()
-    
-    # Wait for all splitting to complete
-    for t in split_threads:
-        t.join()
+    # Process each file one by one (non-concurrent)
+    for i, compressed_file in enumerate(compressed_files, 1):
+        base_name = os.path.basename(compressed_file)
+        logging.info(f"Processing file {i}/{len(compressed_files)}: {base_name}")
+        
+        # 1. Decompress the file (non-concurrent)
+        json_file = decompress_file(compressed_file, json_dir, compression)
+        if not json_file or not os.path.exists(json_file):
+            logging.error(f"Failed to decompress {base_name}, skipping")
+            continue
+        
+        # 2. Split the file (non-concurrent)
+        file_name = os.path.splitext(os.path.basename(json_file))[0]
+        if compression == 'zstd':  # For zst files, remove the .jsonl extension too
+            file_name = os.path.splitext(file_name)[0]
+            
+        try:
+            # Split the file into parts
+            parts = split_for_target_size(json_file, parts_dir, file_name)
+            
+            # Determine dataset for these parts
+            if compression == 'gzip':
+                full_name = f"{file_name}.json.gz"
+            else:  # zstd
+                full_name = f"{file_name}.jsonl.seekable.zst"
+            
+            dataset_name = determine_dataset(full_name)
+            
+            # Add parts to the appropriate dataset group
+            all_split_parts[dataset_name].extend(parts)
+            
+            # Remove original JSON file
+            os.remove(json_file)
+            logging.info(f"Removed {os.path.basename(json_file)} after splitting")
+            
+        except Exception as e:
+            logging.error(f"Error splitting {os.path.basename(json_file)}: {str(e)}")
     
     logging.info(f"All files decompressed and split. Found {len(all_split_parts)} datasets.")
     
     # Now that all files are split and grouped by dataset, sample and analyze each dataset
+    # This part can remain concurrent
     for dataset_name, parts in all_split_parts.items():
         logging.info(f"Dataset {dataset_name} has {len(parts)} split files")
         
@@ -525,7 +532,6 @@ def process_directory(config):
     cleanup_temp_files(json_dir, parts_dir)
     
     logging.info(f"Completed processing directory {source_dir}")
-
 
 def get_common_fields(dataset_name, threshold=None):
     """
@@ -664,7 +670,7 @@ def write_field_reports_for_directory(source_dir):
         report_path = os.path.join(reports_dir, f"{dataset_group}_{dataset_name}_fields_report.txt")
         with open(report_path, 'w') as f:
             f.write(f"==== Field Analysis Report for Dataset: {dataset_name} in {dataset_group} ====\n\n")
-            f.write(f"NOTICE: Analysis used 10% file sampling with 10x scaling for estimation\n\n")
+            f.write(f"NOTICE: Analysis used 20% file sampling with 5x scaling for estimation\n\n")
             total_records = DATASET_RECORD_COUNTS[dataset_name]
             f.write(f"Estimated Total Records: {total_records}\n")
             f.write(f"Total Unique Fields Found: {len(DATASET_FIELDS[dataset_name])}\n\n")
@@ -693,7 +699,7 @@ def write_field_reports_for_directory(source_dir):
         common_fields_report = os.path.join(reports_dir, f"common_fields_across_{dataset_group}.txt")
         with open(common_fields_report, 'w') as f:
             f.write(f"==== Fields Common Across All {dataset_group} Datasets ====\n\n")
-            f.write(f"NOTICE: Analysis used 10% file sampling with 10x scaling for estimation\n\n")
+            f.write(f"NOTICE: Analysis used 20% file sampling with 5x scaling for estimation\n\n")
             f.write(f"Found {len(common_across_datasets)} fields that appear in a majority of records in all datasets:\n\n")
             for field in common_across_datasets:
                 f.write(f"- {field}\n")
@@ -705,7 +711,7 @@ def write_field_reports_for_directory(source_dir):
         combined_fields_report = os.path.join(reports_dir, f"combined_{dataset_group}_fields.txt")
         with open(combined_fields_report, 'w') as f:
             f.write(f"==== Combined Fields for {dataset_group} Datasets ====\n\n")
-            f.write(f"NOTICE: Analysis used 10% file sampling with 10x scaling for estimation\n\n")
+            f.write(f"NOTICE: Analysis used 20% file sampling with 5x scaling for estimation\n\n")
             f.write(f"Total combined fields: {len(combined_fields)}\n\n")
             
             # Group fields by number of datasets
@@ -730,7 +736,7 @@ def write_field_reports_for_directory(source_dir):
                 for k in DATASET_FIELDS.keys()
             },
             'record_counts': dict(DATASET_RECORD_COUNTS),
-            'analysis_method': f"10% file sampling by dataset with 10x scaling",
+            'analysis_method': f"20% file sampling by dataset with 5x scaling",
             'field_presence_threshold': {
                 'elasticsearch': FIELD_PRESENCE_THRESHOLD,
                 'aac': AAC_FIELD_PRESENCE_THRESHOLD
@@ -760,7 +766,8 @@ def convert_json_to_parquet(split_file, dataset_name, parquet_path, fields_to_us
         # Try extraction based on dataset type
         if dataset_name.startswith('aac_'):
             # Para AAC: extraer aacid como campo principal y luego campos comunes de metadata
-            field_extractions = ["\"aacid\" AS \"aacid\""]
+            field_extractions = ["\"aacid\" AS \"aacid\"",
+	    "CAST(\"metadata\" AS VARCHAR) AS \"metadata\""]
             
             # Extract fields from metadata (just like we do with _source in elasticsearch)
             for field_info in fields_to_use:
@@ -768,7 +775,7 @@ def convert_json_to_parquet(split_file, dataset_name, parquet_path, fields_to_us
                 column_name = field_info["column"]
                 
                 # Skip the main field
-                if field_path == 'aacid':
+                if field_path == 'aacid'  or field_path == 'metadata':
                     continue
                 
                 # For fields inside metadata
@@ -1008,8 +1015,8 @@ def process_mini_batch(batch_files, prefix, mega_batch_idx, mini_batch_idx, temp
         conn = duckdb.connect(database=':memory:')
         
         # Performance settings for DuckDB
-        conn.execute("PRAGMA memory_limit='{RAM_MERGE}'")
-        conn.execute("PRAGMA threads={CPU}")
+        conn.execute("PRAGMA memory_limit='30GB'")
+        conn.execute("PRAGMA threads=16")
         
         # Process the files in this mini-batch more efficiently
         # Use a single SQL operation with UNION ALL
@@ -1064,7 +1071,7 @@ def merge_parquet_files_for_directory(config):
     # Determine the final output directory
     if 'elasticsearchaux' in source_dir:
         output_dir = os.path.join(SCRIPT_DIR, 'data', 'elasticsearchauxF')
-        file_pattern = "*.parquet"
+        file_pattern = "metadata_*_*.parquet"
     elif 'elasticsearch' in source_dir and 'aux' not in source_dir:
         output_dir = os.path.join(SCRIPT_DIR, 'data', 'elasticsearchF')
         file_pattern = "other_aarecords__*_*.parquet"
@@ -1181,8 +1188,8 @@ def merge_parquet_files_for_directory(config):
                 logger.info(f"Combining {len(temp_outputs)} temporary files into final output: {final_output}")
                 
                 conn = duckdb.connect(database=':memory:')
-                conn.execute("PRAGMA memory_limit='{RAM_MERGE}'")
-                conn.execute("PRAGMA threads={CPU}")
+                conn.execute("PRAGMA memory_limit='30GB'")
+                conn.execute("PRAGMA threads=16")
                 
                 # Create a file list string for SQL
                 file_list = ", ".join([f"'{f}'" for f in temp_outputs])
